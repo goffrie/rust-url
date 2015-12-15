@@ -13,7 +13,7 @@ use std::fmt::{self, Formatter};
 
 use super::{Url, Host, EncodingOverride};
 use percent_encoding::{
-    utf8_percent_encode_to, percent_encode,
+    utf8_percent_encode_to, percent_encode_to,
     SIMPLE_ENCODE_SET, DEFAULT_ENCODE_SET, USERINFO_ENCODE_SET, QUERY_ENCODE_SET
 };
 
@@ -67,6 +67,7 @@ simple_enum_error! {
     CannotSetHostWithNonRelativeScheme => "cannot set host with non-relative scheme",
     CannotSetPortWithNonRelativeScheme => "cannot set port with non-relative scheme",
     CannotSetPathWithNonRelativeScheme => "cannot set path with non-relative scheme",
+    Overflow => "URLs more than 4 GB are not supported",
 }
 
 impl fmt::Display for ParseError {
@@ -89,8 +90,14 @@ pub enum Context {
     Setter,
 }
 
+enum SchemeType {
+    File,
+    Special, // Other than file
+    Other,
+}
+
 pub struct Parser<'a> {
-    pub url: &'a mut Url,
+    pub serialization: String,
     pub base_url: Option<&'a Url>,
     pub query_encoding_override: EncodingOverride,
     pub log_syntax_violation: Option<&'a Fn(&'static str)>,
@@ -103,7 +110,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn syntax_violation_if<F: Fn() -> bool>(&self, test: F, reason: &'static str) {
+    fn syntax_violation_if<F: Fn() -> bool>(&self, reason: &'static str, test: F) {
         // Skip test if not logging.
         if let Some(log) = self.log_syntax_violation {
             if test() {
@@ -112,39 +119,72 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn push(&mut self, ch: char) {
-        self.url.serialization.push(ch)
-    }
-
-    fn push_str(&mut self, s: &str) {
-        self.url.serialization.push_str(s)
-    }
-
     /// https://url.spec.whatwg.org/#concept-basic-url-parser
-    pub fn parse_url(&mut self, original_input: &str) -> ParseResult<Url> {
+    pub fn parse_url(mut self, original_input: &str) -> ParseResult<Url> {
         let input = original_input.trim_matches(c0_control_or_space);
         if input.len() < original_input.len() {
             self.syntax_violation("leading or trailing control or space character")
         }
-        unimplemented!();
-    //    let (scheme, remaining) = match parse_scheme(input, Context::UrlParser) {
-    //        Some((scheme, remaining)) => (scheme, remaining),
-    //        // No-scheme state
-    //        None => return match parser.base_url {
-    //            Some(&Url { ref scheme, scheme_data: SchemeData::Relative(ref base),
-    //                        ref query, .. }) => {
-    //                let scheme_type = parser.get_scheme_type(&scheme);
-    //                parse_relative_url(input, scheme.clone(), scheme_type, base, query, parser)
-    //            },
-    //            Some(_) => Err(ParseError::RelativeUrlWithNonRelativeBase),
-    //            None => Err(ParseError::RelativeUrlWithoutBase),
-    //        },
-    //    };
-    //    let scheme_type = parser.get_scheme_type(&scheme);
-    //    match scheme_type {
-    //        SchemeType::FileLike => {
+        let (scheme_end, remaining) = if let Ok(remaining) = self.parse_scheme(input, Context::UrlParser) {
+            (self.serialization.len(), remaining)
+        } else {
+            // No-scheme state
+            return if let Some(base_url) = self.base_url {
+                if input.starts_with("#") {
+                    let copied = match base_url.fragment_start {
+                        Some(i) => i as usize,
+                        None => base_url.serialization.len(),
+                    };
+                    debug_assert!(self.serialization.is_empty());
+                    self.serialization.reserve(copied + input.len());
+                    self.serialization.push_str(&base_url.serialization[..copied]);
+                    self.serialization.push_str("#");
+                    self.parse_fragment(&input[1..]);
+                    Ok(Url {
+                        serialization: self.serialization,
+                        non_relative: base_url.non_relative,
+                        scheme_end: base_url.scheme_end,
+                        username_end: base_url.username_end,
+                        host_range: base_url.host_range.clone(),
+                        host: base_url.host,
+                        port: base_url.port,
+                        path_start: base_url.path_start,
+                        query_start: base_url.query_start,
+                        fragment_start: base_url.fragment_start
+                    })
+                } else if base_url.non_relative {
+                    Err(ParseError::RelativeUrlWithNonRelativeBase)
+                } else {
+                    if base_url.scheme() == "file" {
+                        // file state
+                        unimplemented!()
+                    } else {
+                        // relative state
+    //                        let scheme_type = self.get_scheme_type(&scheme);
+    //                        parse_relative_url(input, scheme.clone(), scheme_type, base, query, parser)
+    //                        ....
+                        unimplemented!();
+                    }
+                }
+            } else {
+                Err(ParseError::RelativeUrlWithoutBase)
+            }
+        };
+        let scheme_type = match &*self.serialization {
+            "http" | "https" | "ws" | "wss" | "ftp" | "gopher" => SchemeType::Special,
+            "file" => SchemeType::File,
+            _ => SchemeType::Other,
+        };
+        self.serialization.push(':');
+        match scheme_type {
+            SchemeType::File => {
+                self.syntax_violation_if("expected // after file:", || {
+                    !remaining.starts_with("//")
+                });
+                // File state
+                unimplemented!()
     //            // Relative state?
-    //            match parser.base_url {
+    //            match self.base_url {
     //                Some(&Url { scheme: ref base_scheme, scheme_data: SchemeData::Relative(ref base),
     //                            ref query, .. })
     //                if scheme == *base_scheme => {
@@ -156,44 +196,66 @@ impl<'a> Parser<'a> {
     //                    port: None, default_port: None, path: Vec::new()
     //                }, &None, parser)
     //            }
-    //        },
-    //        SchemeType::Relative(..) => {
-    //            match parser.base_url {
-    //                Some(&Url { scheme: ref base_scheme, scheme_data: SchemeData::Relative(ref base),
-    //                            ref query, .. })
-    //                if scheme == *base_scheme && !remaining.starts_with("//") => {
-    //                    try!(parser.parse_error(ParseError::RelativeUrlWithScheme));
-    //                    parse_relative_url(remaining, scheme, scheme_type, base, query, parser)
-    //                },
-    //                _ => parse_absolute_url(scheme, scheme_type, remaining, parser),
-    //            }
-    //        },
-    //        SchemeType::NonRelative => {
-    //            // Scheme data state
-    //            let (scheme_data, remaining) = try!(parse_scheme_data(remaining, parser));
+            },
+            SchemeType::Special => {
+                match self.base_url {
+                    Some(base_url) if base_url.scheme() == &self.serialization[..scheme_end] => {
+                        // special relative or authority state
+                        unimplemented!();
+//                        if scheme == *base_scheme && !remaining.starts_with("//") => {
+//                            try!(self.syntax_violation(ParseError::RelativeUrlWithScheme));
+//                            parse_relative_url(remaining, scheme, scheme_type, base, query, parser)
+                    }
+                    _ => {
+                        // special authority slashes state
+                        unimplemented!();
+//                        parse_absolute_url(scheme, scheme_type, remaining, parser)
+                    }
+                }
+            },
+            SchemeType::Other => {
+                if remaining.starts_with("/") {
+                    // path or authority state
+                    &remaining[1..];
+                    unimplemented!()
+                } else {
+                    // non-relative path state
+                    let remaining = try!(self.parse_non_relative_path(remaining));
+                    self.parse_query_and_fragment(remaining);
+//                    non_relative: true
+                    unimplemented!()
+                }
     //            let (query, fragment) = try!(parse_query_and_fragment(remaining, parser));
     //            Ok(Url { scheme: scheme, scheme_data: SchemeData::NonRelative(scheme_data),
     //                     query: query, fragment: fragment })
-    //        }
-    //    }
+            }
+        }
     }
 
     pub fn parse_scheme<'i>(&mut self, input: &'i str, context: Context) -> ParseResult<&'i str> {
         if input.is_empty() || !input.starts_with(ascii_alpha) {
             return Err(ParseError::InvalidScheme)
         }
+        debug_assert!(self.serialization.is_empty());
         for (i, c) in input.char_indices() {
             match c {
-                'a'...'z' | '0'...'9' | '+' | '-' | '.' => self.push(c),
-                'A'...'Z' => self.push(c.to_ascii_lowercase()),
+                'a'...'z' | 'A'...'Z' | '0'...'9' | '+' | '-' | '.' => {
+                    self.serialization.push(c.to_ascii_lowercase())
+                }
                 ':' => return Ok(&input[i + 1..]),
-                _ => return Err(ParseError::InvalidScheme)
+                _ => {
+                    self.serialization.clear();
+                    return Err(ParseError::InvalidScheme)
+                }
             }
         }
         // EOF before ':'
         match context {
             Context::Setter => Ok(""),
-            Context::UrlParser => Err(ParseError::InvalidScheme)
+            Context::UrlParser => {
+                self.serialization.clear();
+                Err(ParseError::InvalidScheme)
+            }
         }
     }
 
@@ -226,7 +288,7 @@ impl<'a> Parser<'a> {
     //            // Relative slash state
     //            if matches!(ch, Some('/') | Some('\\')) {
     //                if ch == Some('\\') {
-    //                    try!(parser.parse_error(ParseError::InvalidBackslash))
+    //                    try!(self.syntax_violation(ParseError::InvalidBackslash))
     //                }
     //                if scheme_type == SchemeType::FileLike {
     //                    // File host state
@@ -336,7 +398,7 @@ impl<'a> Parser<'a> {
     //fn skip_slashes<'i>(input: &'i str, parser: &mut Parser) -> ParseResult<&'i str> {
     //    let first_non_slash = input.find(|c| !matches!(c, '/' | '\\')).unwrap_or(input.len());
     //    if &input[..first_non_slash] != "//" {
-    //        try!(parser.parse_error(ParseError::ExpectedTwoSlashes));
+    //        try!(self.syntax_violation(ParseError::ExpectedTwoSlashes));
     //    }
     //    Ok(&input[first_non_slash..])
     //}
@@ -348,7 +410,7 @@ impl<'a> Parser<'a> {
     //        match c {
     //            '@' => {
     //                if last_at.is_some() {
-    //                    try!(parser.parse_error(ParseError::InvalidAtSymbolInUser))
+    //                    try!(self.syntax_violation(ParseError::InvalidAtSymbolInUser))
     //                }
     //                last_at = Some(i)
     //            },
@@ -369,7 +431,7 @@ impl<'a> Parser<'a> {
     //                password = Some(try!(parse_password(&input[i + 1..], parser)));
     //                break
     //            },
-    //            '\t' | '\n' | '\r' => try!(parser.parse_error(ParseError::InvalidCharacter)),
+    //            '\t' | '\n' | '\r' => try!(self.syntax_violation(ParseError::InvalidCharacter)),
     //            _ => {
     //                try!(check_url_code_point(input, i, c, parser));
     //                // The spec says to use the default encode set,
@@ -386,7 +448,7 @@ impl<'a> Parser<'a> {
     //    let mut password = String::new();
     //    for (i, c, next_i) in input.char_ranges() {
     //        match c {
-    //            '\t' | '\n' | '\r' => try!(parser.parse_error(ParseError::InvalidCharacter)),
+    //            '\t' | '\n' | '\r' => try!(self.syntax_violation(ParseError::InvalidCharacter)),
     //            _ => {
     //                try!(check_url_code_point(input, i, c, parser));
     //                // The spec says to use the default encode set,
@@ -425,7 +487,7 @@ impl<'a> Parser<'a> {
     //                end = i;
     //                break
     //            },
-    //            '\t' | '\n' | '\r' => try!(parser.parse_error(ParseError::InvalidCharacter)),
+    //            '\t' | '\n' | '\r' => try!(self.syntax_violation(ParseError::InvalidCharacter)),
     //            c => {
     //                match c {
     //                    '[' => inside_square_brackets = true,
@@ -458,7 +520,7 @@ impl<'a> Parser<'a> {
     //                end = i;
     //                break
     //            },
-    //            '\t' | '\n' | '\r' => try!(parser.parse_error(ParseError::InvalidCharacter)),
+    //            '\t' | '\n' | '\r' => try!(self.syntax_violation(ParseError::InvalidCharacter)),
     //            _ => return Err(ParseError::InvalidPort)
     //        }
     //    }
@@ -479,7 +541,7 @@ impl<'a> Parser<'a> {
     //                end = i;
     //                break
     //            },
-    //            '\t' | '\n' | '\r' => try!(parser.parse_error(ParseError::InvalidCharacter)),
+    //            '\t' | '\n' | '\r' => try!(self.syntax_violation(ParseError::InvalidCharacter)),
     //            _ => host_input.push(c)
     //        }
     //    }
@@ -495,7 +557,7 @@ impl<'a> Parser<'a> {
     //                             -> ParseResult<(Vec<String>, Option<String>, Option<String>)> {
     //    if !input.starts_with("/") {
     //        if input.starts_with("\\") {
-    //            try!(parser.parse_error(ParseError::InvalidBackslash));
+    //            try!(self.syntax_violation(ParseError::InvalidBackslash));
     //        } else {
     //            return Err(ParseError::ExpectedInitialSlash)
     //        }
@@ -514,7 +576,7 @@ impl<'a> Parser<'a> {
     //    match input.chars().next() {
     //        Some('/') => i = 1,
     //        Some('\\') => {
-    //            try!(parser.parse_error(ParseError::InvalidBackslash));
+    //            try!(self.syntax_violation(ParseError::InvalidBackslash));
     //            i = 1;
     //        },
     //        _ => ()
@@ -541,7 +603,7 @@ impl<'a> Parser<'a> {
     //                    break
     //                },
     //                '\\' => {
-    //                    try!(parser.parse_error(ParseError::InvalidBackslash));
+    //                    try!(self.syntax_violation(ParseError::InvalidBackslash));
     //                    ends_with_slash = true;
     //                    end = i;
     //                    break
@@ -550,7 +612,7 @@ impl<'a> Parser<'a> {
     //                    end = i;
     //                    break
     //                },
-    //                '\t' | '\n' | '\r' => try!(parser.parse_error(ParseError::InvalidCharacter)),
+    //                '\t' | '\n' | '\r' => try!(self.syntax_violation(ParseError::InvalidCharacter)),
     //                _ => {
     //                    try!(check_url_code_point(input, i, c, parser));
     //                    utf8_percent_encode_to(&input[i..next_i],
@@ -592,172 +654,167 @@ impl<'a> Parser<'a> {
     //    Ok((path, &input[end..]))
     //}
 
-    //fn parse_scheme_data<'i>(input: &'i str, parser: &mut Parser)
-    //                         -> ParseResult<(String, &'i str)> {
-    //    let mut scheme_data = String::new();
-    //    let mut end = input.len();
-    //    for (i, c, next_i) in input.char_ranges() {
-    //        match c {
-    //            '?' | '#' => {
-    //                end = i;
-    //                break
-    //            },
-    //            '\t' | '\n' | '\r' => try!(parser.parse_error(ParseError::InvalidCharacter)),
-    //            _ => {
-    //                try!(check_url_code_point(input, i, c, parser));
-    //                utf8_percent_encode_to(&input[i..next_i],
-    //                                    SIMPLE_ENCODE_SET, &mut scheme_data);
-    //            }
-    //        }
-    //    }
-    //    Ok((scheme_data, &input[end..]))
-    //}
+    fn parse_non_relative_path<'i>(&mut self, input: &'i str) -> ParseResult<&'i str> {
+        let mut end = input.len();
+        for (i, c, next_i) in input.char_ranges() {
+            match c {
+                '?' | '#' => return Ok(&input[i..]),
+                '\t' | '\n' | '\r' => self.syntax_violation("invalid character"),
+                _ => {
+                    self.check_url_code_point(input, i, c);
+                    utf8_percent_encode_to(
+                        &input[i..next_i], SIMPLE_ENCODE_SET, &mut self.serialization);
+                }
+            }
+        }
+        Ok("")
+    }
 
-    //fn parse_query_and_fragment(input: &str, parser: &mut Parser)
-    //                            -> ParseResult<(Option<String>, Option<String>)> {
-    //    match input.chars().next() {
-    //        Some('#') => Ok((None, Some(try!(parse_fragment(&input[1..], parser))))),
-    //        Some('?') => {
-    //            let (query, remaining) = try!(parse_query(
-    //                &input[1..], Context::UrlParser, parser));
-    //            let fragment = match remaining {
-    //                Some(remaining) => Some(try!(parse_fragment(remaining, parser))),
-    //                None => None
-    //            };
-    //            Ok((Some(query), fragment))
-    //        },
-    //        None => Ok((None, None)),
-    //        _ => panic!("Programming error. parse_query_and_fragment() should not \
-    //                    have been called with input \"{}\"", input)
-    //    }
-    //}
+    /// Return (query_start, fragment_start)
+    fn parse_query_and_fragment(&mut self, mut input: &str)
+                                -> ParseResult<(Option<u32>, Option<u32>)> {
+        let mut query_start = None;
+        match input.chars().next() {
+            Some('#') => {}
+            Some('?') => {
+                query_start = Some(try!(to_u32(self.serialization.len())));
+                self.serialization.push('?');
+                if let Some(remaining) = self.parse_query(&input[1..], Context::UrlParser) {
+                    input = remaining
+                } else {
+                    return Ok((query_start, None))
+                }
+            }
+            None => return Ok((None, None)),
+            _ => panic!("Programming error. parse_query_and_fragment() should not \
+                        have been called with input \"{}\"", input)
+        };
 
-    //pub fn parse_query<'i>(input: &'i str, context: Context, parser: &mut Parser)
-    //                   -> ParseResult<(String, Option<&'i str>)> {
-    //    let mut query = String::new();
-    //    let mut remaining = None;
-    //    for (i, c) in input.char_indices() {
-    //        match c {
-    //            '#' if context == Context::UrlParser => {
-    //                remaining = Some(&input[i + 1..]);
-    //                break
-    //            },
-    //            '\t' | '\n' | '\r' => try!(parser.parse_error(ParseError::InvalidCharacter)),
-    //            _ => {
-    //                try!(check_url_code_point(input, i, c, parser));
-    //                query.push(c);
-    //            }
-    //        }
-    //    }
+        let fragment_start = try!(to_u32(self.serialization.len()));
+        self.serialization.push('#');
+        self.parse_fragment(&input[1..]);
+        Ok((query_start, Some(fragment_start)))
+    }
 
-    //    let query_bytes = parser.query_encoding_override.encode(&query);
-    //    Ok((percent_encode(&query_bytes, QUERY_ENCODE_SET), remaining))
-    //}
+    pub fn parse_query<'i>(&mut self, input: &'i str, context: Context) -> Option<&'i str> {
+        let mut query = String::new();  // FIXME: stream this to self.serialization
+        let mut remaining = None;
+        for (i, c) in input.char_indices() {
+            match c {
+                '#' if context == Context::UrlParser => {
+                    remaining = Some(&input[i + 1..]);
+                    break
+                },
+                '\t' | '\n' | '\r' => self.syntax_violation("invalid characters"),
+                _ => {
+                    self.check_url_code_point(input, i, c);
+                    query.push(c);
+                }
+            }
+        }
 
-    //pub fn parse_fragment<'i>(input: &'i str, parser: &mut Parser) -> ParseResult<String> {
-    //    let mut fragment = String::new();
-    //    for (i, c, next_i) in input.char_ranges() {
-    //        match c {
-    //            '\t' | '\n' | '\r' => try!(parser.parse_error(ParseError::InvalidCharacter)),
-    //            _ => {
-    //                try!(check_url_code_point(input, i, c, parser));
-    //                utf8_percent_encode_to(&input[i..next_i],
-    //                                    SIMPLE_ENCODE_SET, &mut fragment);
-    //            }
-    //        }
-    //    }
-    //    Ok(fragment)
-    //}
+        let query_bytes = self.query_encoding_override.encode(&query);
+        percent_encode_to(&query_bytes, QUERY_ENCODE_SET, &mut self.serialization);
+        remaining
+    }
+
+    pub fn parse_fragment(&mut self, input: &str) {
+        for (i, c, next_i) in input.char_ranges() {
+            match c {
+                '\0' | '\t' | '\n' | '\r' => self.syntax_violation("invalid character"),
+                _ => {
+                    self.check_url_code_point(input, i, c);
+                    utf8_percent_encode_to(
+                        &input[i..next_i], SIMPLE_ENCODE_SET, &mut self.serialization);
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn check_url_code_point(&self, input: &str, i: usize, c: char) {
+        if let Some(log) = self.log_syntax_violation {
+            if c == '%' {
+                if !starts_with_2_hex(&input[i + 1..]) {
+                    log("expected 2 hex digits after %")
+                }
+            } else if !is_url_code_point(c) {
+                log("non-URL code point")
+            }
+        }
+    }
 }
 
 #[inline]
-pub fn starts_with_ascii_alpha(string: &str) -> bool {
-    matches!(string.as_bytes()[0], b'a'...b'z' | b'A'...b'Z')
+fn is_ascii_hex_digit(byte: u8) -> bool {
+    matches!(byte, b'a'...b'f' | b'A'...b'F' | b'0'...b'9')
 }
 
-//#[inline]
-//fn is_ascii_hex_digit(byte: u8) -> bool {
-//    matches!(byte, b'a'...b'f' | b'A'...b'F' | b'0'...b'9')
-//}
+#[inline]
+fn starts_with_2_hex(input: &str) -> bool {
+    input.len() >= 2
+    && is_ascii_hex_digit(input.as_bytes()[0])
+    && is_ascii_hex_digit(input.as_bytes()[1])
+}
 
-//#[inline]
-//fn starts_with_2_hex(input: &str) -> bool {
-//    input.len() >= 2
-//    && is_ascii_hex_digit(input.as_bytes()[0])
-//    && is_ascii_hex_digit(input.as_bytes()[1])
-//}
+// Non URL code points:
+// U+0000 to U+0020 (space)
+// " # % < > [ \ ] ^ ` { | }
+// U+007F to U+009F
+// surrogates
+// U+FDD0 to U+FDEF
+// Last two of each plane: U+__FFFE to U+__FFFF for __ in 00 to 10 hex
+#[inline]
+fn is_url_code_point(c: char) -> bool {
+    matches!(c,
+        'a'...'z' |
+        'A'...'Z' |
+        '0'...'9' |
+        '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | '-' |
+        '.' | '/' | ':' | ';' | '=' | '?' | '@' | '_' | '~' |
+        '\u{A0}'...'\u{D7FF}' | '\u{E000}'...'\u{FDCF}' | '\u{FDF0}'...'\u{FFFD}' |
+        '\u{10000}'...'\u{1FFFD}' | '\u{20000}'...'\u{2FFFD}' |
+        '\u{30000}'...'\u{3FFFD}' | '\u{40000}'...'\u{4FFFD}' |
+        '\u{50000}'...'\u{5FFFD}' | '\u{60000}'...'\u{6FFFD}' |
+        '\u{70000}'...'\u{7FFFD}' | '\u{80000}'...'\u{8FFFD}' |
+        '\u{90000}'...'\u{9FFFD}' | '\u{A0000}'...'\u{AFFFD}' |
+        '\u{B0000}'...'\u{BFFFD}' | '\u{C0000}'...'\u{CFFFD}' |
+        '\u{D0000}'...'\u{DFFFD}' | '\u{E1000}'...'\u{EFFFD}' |
+        '\u{F0000}'...'\u{FFFFD}' | '\u{100000}'...'\u{10FFFD}')
+}
 
-//#[inline]
-//fn is_url_code_point(c: char) -> bool {
-//    matches!(c,
-//        'a'...'z' |
-//        'A'...'Z' |
-//        '0'...'9' |
-//        '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | '-' |
-//        '.' | '/' | ':' | ';' | '=' | '?' | '@' | '_' | '~' |
-//        '\u{A0}'...'\u{D7FF}' | '\u{E000}'...'\u{FDCF}' | '\u{FDF0}'...'\u{FFFD}' |
-//        '\u{10000}'...'\u{1FFFD}' | '\u{20000}'...'\u{2FFFD}' |
-//        '\u{30000}'...'\u{3FFFD}' | '\u{40000}'...'\u{4FFFD}' |
-//        '\u{50000}'...'\u{5FFFD}' | '\u{60000}'...'\u{6FFFD}' |
-//        '\u{70000}'...'\u{7FFFD}' | '\u{80000}'...'\u{8FFFD}' |
-//        '\u{90000}'...'\u{9FFFD}' | '\u{A0000}'...'\u{AFFFD}' |
-//        '\u{B0000}'...'\u{BFFFD}' | '\u{C0000}'...'\u{CFFFD}' |
-//        '\u{D0000}'...'\u{DFFFD}' | '\u{E1000}'...'\u{EFFFD}' |
-//        '\u{F0000}'...'\u{FFFFD}' | '\u{100000}'...'\u{10FFFD}')
-//}
 
-//// Non URL code points:
-//// U+0000 to U+0020 (space)
-//// " # % < > [ \ ] ^ ` { | }
-//// U+007F to U+009F
-//// surrogates
-//// U+FDD0 to U+FDEF
-//// Last two of each plane: U+__FFFE to U+__FFFF for __ in 00 to 10 hex
+pub trait StrCharRanges<'a> {
+    fn char_ranges(&self) -> CharRanges<'a>;
+}
 
-//pub trait StrCharRanges<'a> {
-//    fn char_ranges(&self) -> CharRanges<'a>;
-//}
+impl<'a> StrCharRanges<'a> for &'a str {
+    #[inline]
+    fn char_ranges(&self) -> CharRanges<'a> {
+        CharRanges { slice: *self, position: 0 }
+    }
+}
 
-//impl<'a> StrCharRanges<'a> for &'a str {
-//    #[inline]
-//    fn char_ranges(&self) -> CharRanges<'a> {
-//        CharRanges { slice: *self, position: 0 }
-//    }
-//}
+pub struct CharRanges<'a> {
+    slice: &'a str,
+    position: usize,
+}
 
-//pub struct CharRanges<'a> {
-//    slice: &'a str,
-//    position: usize,
-//}
+impl<'a> Iterator for CharRanges<'a> {
+    type Item = (usize, char, usize);
 
-//impl<'a> Iterator for CharRanges<'a> {
-//    type Item = (usize, char, usize);
-
-//    #[inline]
-//    fn next(&mut self) -> Option<(usize, char, usize)> {
-//        match self.slice[self.position..].chars().next() {
-//            Some(ch) => {
-//                let position = self.position;
-//                self.position = position + ch.len_utf8();
-//                Some((position, ch, position + ch.len_utf8()))
-//            }
-//            None => None,
-//        }
-//    }
-//}
-
-//#[inline]
-//fn check_url_code_point(input: &str, i: usize, c: char, parser: &mut Parser)
-//                        -> ParseResult<()> {
-//    if c == '%' {
-//        if !starts_with_2_hex(&input[i + 1..]) {
-//            try!(parser.parse_error(ParseError::InvalidPercentEncoded));
-//        }
-//    } else if !is_url_code_point(c) {
-//        try!(parser.parse_error(ParseError::NonUrlCodePoint));
-//    }
-//    Ok(())
-//}
+    #[inline]
+    fn next(&mut self) -> Option<(usize, char, usize)> {
+        match self.slice[self.position..].chars().next() {
+            Some(ch) => {
+                let position = self.position;
+                self.position = position + ch.len_utf8();
+                Some((position, ch, position + ch.len_utf8()))
+            }
+            None => None,
+        }
+    }
+}
 
 /// https://url.spec.whatwg.org/#c0-controls-and-space
 #[inline]
@@ -769,4 +826,13 @@ fn c0_control_or_space(ch: char) -> bool {
 #[inline]
 fn ascii_alpha(ch: char) -> bool {
     matches!(ch, 'a'...'z' | 'A'...'Z')
+}
+
+#[inline]
+fn to_u32(i: usize) -> ParseResult<u32> {
+    if i <= ::std::u32::MAX as usize {
+        Ok(i as u32)
+    } else {
+        Err(ParseError::Overflow)
+    }
 }

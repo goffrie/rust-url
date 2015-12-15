@@ -178,7 +178,7 @@ pub struct Url {
     fragment_start: Option<u32>,  // Before '#'
 }
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 enum HostInternal {
     None,
     Domain,
@@ -222,28 +222,24 @@ impl Url {
                       encoding_override: EncodingOverride,
                       log_syntax_violation: Option<&Fn(&'static str)>)
                       -> Result<Url, ::ParseError> {
-        let mut url = Url {
-            serialization: String::new(),
-            non_relative: false,
-            scheme_end: 0,
-            username_end: 0,
-            host_range: 0..0,
-            host: HostInternal::None,
-            port: None,
-            path_start: 0,
-            query_start: None,
-            fragment_start: None,
-        };
-        {
-            let mut parser = parser::Parser {
-                url: &mut url,
-                base_url: base_url,
-                query_encoding_override: EncodingOverride,
-                log_syntax_violation: log_syntax_violation,
-            };
-            try!(parser.parse_url(input));
-        }
-        Ok(url)
+//        let mut url = Url {
+//            serialization: String::new(),
+//            non_relative: false,
+//            scheme_end: 0,
+//            username_end: 0,
+//            host_range: 0..0,
+//            host: HostInternal::None,
+//            port: None,
+//            path_start: 0,
+//            query_start: None,
+//            fragment_start: None,
+//        };
+        parser::Parser {
+            serialization: String::with_capacity(input.len()),
+            base_url: base_url,
+            query_encoding_override: EncodingOverride,
+            log_syntax_violation: log_syntax_violation,
+        }.parse_url(input)
     }
 
     /// Return the scheme of this URL, as an ASCII string without the ':' delimiter.
