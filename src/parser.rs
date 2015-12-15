@@ -11,7 +11,7 @@ use std::cmp::max;
 use std::error::Error;
 use std::fmt::{self, Formatter};
 
-use super::{Url, Host, EncodingOverride};
+use super::{Url, Host, HostInternal, EncodingOverride};
 use percent_encoding::{
     utf8_percent_encode_to, percent_encode_to,
     SIMPLE_ENCODE_SET, DEFAULT_ENCODE_SET, USERINFO_ENCODE_SET, QUERY_ENCODE_SET
@@ -90,10 +90,17 @@ pub enum Context {
     Setter,
 }
 
+#[derive(Copy, Clone)]
 enum SchemeType {
     File,
-    Special, // Other than file
-    Other,
+    SpecialNotFile,
+    NotSpecial,
+}
+
+impl SchemeType {
+    fn is_special(&self) -> bool {
+        !matches!(*self, SchemeType::NotSpecial)
+    }
 }
 
 pub struct Parser<'a> {
@@ -126,7 +133,7 @@ impl<'a> Parser<'a> {
             self.syntax_violation("leading or trailing control or space character")
         }
         let (scheme_end, remaining) = if let Ok(remaining) = self.parse_scheme(input, Context::UrlParser) {
-            (self.serialization.len(), remaining)
+            (try!(to_u32(self.serialization.len())), remaining)
         } else {
             // No-scheme state
             return if let Some(base_url) = self.base_url {
@@ -171,9 +178,9 @@ impl<'a> Parser<'a> {
             }
         };
         let scheme_type = match &*self.serialization {
-            "http" | "https" | "ws" | "wss" | "ftp" | "gopher" => SchemeType::Special,
+            "http" | "https" | "ws" | "wss" | "ftp" | "gopher" => SchemeType::SpecialNotFile,
             "file" => SchemeType::File,
-            _ => SchemeType::Other,
+            _ => SchemeType::NotSpecial,
         };
         self.serialization.push(':');
         match scheme_type {
@@ -197,9 +204,9 @@ impl<'a> Parser<'a> {
     //                }, &None, parser)
     //            }
             },
-            SchemeType::Special => {
+            SchemeType::SpecialNotFile => {
                 match self.base_url {
-                    Some(base_url) if base_url.scheme() == &self.serialization[..scheme_end] => {
+                    Some(base_url) if base_url.scheme() == &self.serialization[..scheme_end as usize] => {
                         // special relative or authority state
                         unimplemented!();
 //                        if scheme == *base_scheme && !remaining.starts_with("//") => {
@@ -213,21 +220,34 @@ impl<'a> Parser<'a> {
                     }
                 }
             },
-            SchemeType::Other => {
-                if remaining.starts_with("/") {
-                    // path or authority state
-                    &remaining[1..];
+            SchemeType::NotSpecial => {
+                if remaining.starts_with("//") {
+                    // authority state
+                    &remaining[2..];
                     unimplemented!()
                 } else {
-                    // non-relative path state
-                    let remaining = try!(self.parse_non_relative_path(remaining));
-                    self.parse_query_and_fragment(remaining);
-//                    non_relative: true
-                    unimplemented!()
+                    let path_start = try!(to_u32(self.serialization.len()));
+                    let remaining = if remaining.starts_with("/") {
+                        self.serialization.push('/');
+                        self.parse_path(scheme_type, &mut false, &remaining[1..], Context::UrlParser)
+                    } else {
+                        self.parse_non_relative_path(remaining)
+                    };
+                    let (query_start, fragment_start) =
+                        try!(self.parse_query_and_fragment(scheme_end, remaining));
+                    Ok(Url {
+                        serialization: self.serialization,
+                        non_relative: true,
+                        scheme_end: scheme_end,
+                        username_end: 0,
+                        host_range: 0..0,
+                        host: HostInternal::None,
+                        port: None,
+                        path_start: path_start,
+                        query_start: query_start,
+                        fragment_start: fragment_start
+                    })
                 }
-    //            let (query, fragment) = try!(parse_query_and_fragment(remaining, parser));
-    //            Ok(Url { scheme: scheme, scheme_data: SchemeData::NonRelative(scheme_data),
-    //                     query: query, fragment: fragment })
             }
         }
     }
@@ -584,81 +604,102 @@ impl<'a> Parser<'a> {
     //    parse_path(&[], &input[i..], context, scheme_type, parser)
     //}
 
-    //fn parse_path<'i>(base_path: &[String], input: &'i str, context: Context,
-    //                  scheme_type: SchemeType, parser: &mut Parser)
-    //                  -> ParseResult<(Vec<String>, &'i str)> {
-    //    // Relative path state
-    //    let mut path = base_path.to_vec();
-    //    let mut iter = input.char_ranges();
-    //    let mut end;
-    //    loop {
-    //        let mut path_part = String::new();
-    //        let mut ends_with_slash = false;
-    //        end = input.len();
-    //        while let Some((i, c, next_i)) = iter.next() {
-    //            match c {
-    //                '/' => {
-    //                    ends_with_slash = true;
-    //                    end = i;
-    //                    break
-    //                },
-    //                '\\' => {
-    //                    try!(self.syntax_violation(ParseError::InvalidBackslash));
-    //                    ends_with_slash = true;
-    //                    end = i;
-    //                    break
-    //                },
-    //                '?' | '#' if context == Context::UrlParser => {
-    //                    end = i;
-    //                    break
-    //                },
-    //                '\t' | '\n' | '\r' => try!(self.syntax_violation(ParseError::InvalidCharacter)),
-    //                _ => {
-    //                    try!(check_url_code_point(input, i, c, parser));
-    //                    utf8_percent_encode_to(&input[i..next_i],
-    //                                        DEFAULT_ENCODE_SET, &mut path_part);
-    //                }
-    //            }
-    //        }
-    //        match &*path_part {
-    //            ".." | ".%2e" | ".%2E" | "%2e." | "%2E." |
-    //            "%2e%2e" | "%2E%2e" | "%2e%2E" | "%2E%2E" => {
-    //                path.pop();
-    //                if !ends_with_slash {
-    //                    path.push(String::new());
-    //                }
-    //            },
-    //            "." | "%2e" | "%2E" => {
-    //                if !ends_with_slash {
-    //                    path.push(String::new());
-    //                }
-    //            },
-    //            _ => {
-    //                if scheme_type == SchemeType::FileLike
-    //                   && path.is_empty()
-    //                   && path_part.len() == 2
-    //                   && starts_with_ascii_alpha(&path_part)
-    //                   && path_part.as_bytes()[1] == b'|' {
-    //                    // Windows drive letter quirk
-    //                    unsafe {
-    //                        path_part.as_mut_vec()[1] = b':'
-    //                    }
-    //                }
-    //                path.push(path_part)
-    //            }
-    //        }
-    //        if !ends_with_slash {
-    //            break
-    //        }
-    //    }
-    //    Ok((path, &input[end..]))
-    //}
+    fn parse_path<'i>(&mut self, scheme_type: SchemeType, has_host: &mut bool,
+                      input: &'i str, context: Context)
+                      -> &'i str {
+        // Relative path state
+        let path_start = self.serialization.len();  // After initial '/', unlike Url::path_start
+        let mut iter = input.char_ranges();
+        let mut end;
+        loop {
+            let component_start = self.serialization.len();
+            let mut ends_with_slash = false;
+            end = input.len();
+            while let Some((i, c, next_i)) = iter.next() {
+                match c {
+                    '/' => {
+                        ends_with_slash = true;
+                        end = i;
+                        break
+                    },
+                    '\\' if scheme_type.is_special() => {
+                        self.syntax_violation("backslash");
+                        ends_with_slash = true;
+                        end = i;
+                        break
+                    },
+                    '?' | '#' if context == Context::UrlParser => {
+                        end = i;
+                        break
+                    },
+                    '\t' | '\n' | '\r' => self.syntax_violation("invalid characters"),
+                    _ => {
+                        self.check_url_code_point(input, i, c);
+                        utf8_percent_encode_to(
+                            &input[i..next_i], DEFAULT_ENCODE_SET, &mut self.serialization);
+                    }
+                }
+            }
+            match &self.serialization[component_start..] {
+                ".." | ".%2e" | ".%2E" | "%2e." | "%2E." |
+                "%2e%2e" | "%2E%2e" | "%2e%2E" | "%2E%2E" => {
+                    self.pop_path(scheme_type, path_start, component_start)
+                },
+                "." | "%2e" | "%2E" => {
+                    self.serialization.truncate(component_start);
+                },
+                _ => {
+                    if is_windows_drive_letter(scheme_type, &self.serialization[path_start..]) {
+                        unsafe {
+                            *self.serialization.as_mut_vec().last_mut().unwrap() = b':'
+                        }
+                        if *has_host {
+                            self.syntax_violation("file: with host and Windows drive letter");
+                            *has_host = false;
+                        }
+                    }
+                    if ends_with_slash {
+                        self.serialization.push('/')
+                    }
+                }
+            }
+            if !ends_with_slash {
+                break
+            }
+        }
+        &input[end..]
+    }
 
-    fn parse_non_relative_path<'i>(&mut self, input: &'i str) -> ParseResult<&'i str> {
+    /// https://url.spec.whatwg.org/#pop-a-urls-path
+    fn pop_path(&mut self, scheme_type: SchemeType, path_start: usize, component_start: usize) {
+        // Truncate at least ".."
+        let mut truncate_to = component_start;
+
+        if component_start != path_start {
+            debug_assert!(self.serialization[path_start..component_start].ends_with("/"));
+            let previous_component_end = component_start - 1;
+            let before_this_component = &self.serialization[path_start..previous_component_end];
+            let previous_component_start = match before_this_component.rfind('/') {
+                Some(slash_position) => path_start + slash_position + "/".len(),
+                None => path_start,
+            };
+            // Don’t pop a Windows drive letter
+            if !is_windows_drive_letter(
+                scheme_type,
+                &self.serialization[previous_component_start..previous_component_end]
+            ) {
+                truncate_to = previous_component_start
+            }
+        };
+
+        self.serialization.truncate(truncate_to);
+    }
+
+    fn parse_non_relative_path<'i>(&mut self, input: &'i str) -> &'i str {
         let mut end = input.len();
         for (i, c, next_i) in input.char_ranges() {
             match c {
-                '?' | '#' => return Ok(&input[i..]),
+                '?' | '#' => return &input[i..],
                 '\t' | '\n' | '\r' => self.syntax_violation("invalid character"),
                 _ => {
                     self.check_url_code_point(input, i, c);
@@ -667,11 +708,11 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        Ok("")
+        ""
     }
 
     /// Return (query_start, fragment_start)
-    fn parse_query_and_fragment(&mut self, mut input: &str)
+    fn parse_query_and_fragment(&mut self, scheme_end: u32, mut input: &str)
                                 -> ParseResult<(Option<u32>, Option<u32>)> {
         let mut query_start = None;
         match input.chars().next() {
@@ -679,7 +720,8 @@ impl<'a> Parser<'a> {
             Some('?') => {
                 query_start = Some(try!(to_u32(self.serialization.len())));
                 self.serialization.push('?');
-                if let Some(remaining) = self.parse_query(&input[1..], Context::UrlParser) {
+                let remaining = self.parse_query(scheme_end, &input[1..], Context::UrlParser);
+                if let Some(remaining) = remaining {
                     input = remaining
                 } else {
                     return Ok((query_start, None))
@@ -696,8 +738,9 @@ impl<'a> Parser<'a> {
         Ok((query_start, Some(fragment_start)))
     }
 
-    pub fn parse_query<'i>(&mut self, input: &'i str, context: Context) -> Option<&'i str> {
-        let mut query = String::new();  // FIXME: stream this to self.serialization
+    pub fn parse_query<'i>(&mut self, scheme_end: u32, input: &'i str, context: Context)
+                           -> Option<&'i str> {
+        let mut query = String::new();  // FIXME: use a streaming decoder instead
         let mut remaining = None;
         for (i, c) in input.char_indices() {
             match c {
@@ -713,7 +756,11 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let query_bytes = self.query_encoding_override.encode(&query);
+        let encoding = match &self.serialization[..scheme_end as usize] {
+            "http" | "https" | "file" | "ftp" | "gopher" => self.query_encoding_override,
+            _ => EncodingOverride::utf8(),
+        };
+        let query_bytes = encoding.encode(&query);
         percent_encode_to(&query_bytes, QUERY_ENCODE_SET, &mut self.serialization);
         remaining
     }
@@ -835,4 +882,13 @@ fn to_u32(i: usize) -> ParseResult<u32> {
     } else {
         Err(ParseError::Overflow)
     }
+}
+
+/// Wether the scheme is file:, the path has a single component, and that component
+/// is a Windows drive letter
+fn is_windows_drive_letter(scheme_type: SchemeType, component: &str) -> bool {
+    matches!(scheme_type, SchemeType::File)
+    && component.len() == 2
+    && ascii_alpha(component.as_bytes()[0] as char)
+    && matches!(component.as_bytes()[1], b':' | b'|')
 }
