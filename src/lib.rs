@@ -145,7 +145,7 @@ use std::cmp;
 use std::fmt;
 use std::hash;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::ops::{Range, RangeFrom, RangeTo};
+use std::ops::{Range, RangeFrom, RangeTo, RangeFull, Index};
 
 use percent_encoding::{percent_encode, lossy_utf8_percent_decode, DEFAULT_ENCODE_SET};
 pub use encoding::EncodingOverride;
@@ -175,8 +175,8 @@ pub struct Url {
     host: HostInternal,
     port: Option<u16>,
     path_start: u32,  // Before initial '/' if !non_relative
-    query_start: Option<u32>,  // Before '?'
-    fragment_start: Option<u32>,  // Before '#'
+    query_start: Option<u32>,  // Before '?', unlike Position::QueryStart
+    fragment_start: Option<u32>,  // Before '#', unlike Position::FragmentStart
 }
 
 #[derive(Copy, Clone)]
@@ -256,11 +256,11 @@ impl Url {
 
     /// Return the password for this URL, if any, as a percent-encoded ASCII string.
     pub fn password(&self) -> Option<&str> {
-        if self.byte_at(self.username_end) == b':' {
+        if self.port.is_some() {
             debug_assert!(self.has_host());
-            let password_end = self.host_start - 1;
-            debug_assert!(self.byte_at(password_end) == b'@');
-            Some(self.slice(self.username_end + 1..password_end))
+            debug_assert!(self.byte_at(self.username_end) == b':');
+            debug_assert!(self.byte_at(self.host_start - 1) == b'@');
+            Some(self.slice(self.username_end + 1..self.host_start - 1))
         } else {
             None
         }
@@ -352,16 +352,7 @@ impl Url {
             self.slice(start + 1..)
         })
     }
-
-    /// Return the serialization of this URL without any fragment identifier.
-    pub fn without_fragment(&self) -> &str {
-        match self.fragment_start {
-            Some(fragment_start) => self.slice(..fragment_start),
-            None => &self.serialization
-        }
-    }
 }
-
 
 /// https://url.spec.whatwg.org/#api
 ///
@@ -576,7 +567,175 @@ impl AsRef<str> for Url {
     }
 }
 
+impl Index<RangeFull> for Url {
+    type Output = str;
+    fn index(&self, _: RangeFull) -> &str {
+        &self.serialization
+    }
+}
+
+impl Index<RangeFrom<Position>> for Url {
+    type Output = str;
+    fn index(&self, range: RangeFrom<Position>) -> &str {
+        &self.serialization[self.index(range.start)..]
+    }
+}
+
+impl Index<RangeTo<Position>> for Url {
+    type Output = str;
+    fn index(&self, range: RangeTo<Position>) -> &str {
+        &self.serialization[..self.index(range.end)]
+    }
+}
+
+impl Index<Range<Position>> for Url {
+    type Output = str;
+    fn index(&self, range: Range<Position>) -> &str {
+        &self.serialization[self.index(range.start)..self.index(range.end)]
+    }
+}
+
+/// Indicates a position within a URL based on its components.
+///
+/// A range of positions can be used for slicing `Url`:
+///
+/// ```rust
+/// let serialization: &str = &some_url[..];
+/// let serialization_without_fragment: &str = &some_url[..Position::QueryEnd];
+/// let authority: &str = &some_url[Position::UsernameStart..Position::PortEnd];
+/// let data_url_payload: &str = &some_url[Position::PathStart..Position::QueryEnd];
+/// let scheme_relative: &str = &some_url[Position::UsernameStart..];
+/// ```
+///
+/// In a pseudo-grammar (where `[`…`]?` makes a sub-sequence optional),
+/// URL components and delimiters that separate them are:
+///
+/// ```notrust
+/// url =
+///     scheme ":"
+///     [ "//" [ username [ ":" password ]? "@" ]? host [ ":" port ]? ]
+///     path [ "?" query ]? [ "#" fragment ]?
+/// ```
+///
+/// When a given component is not present,
+/// its "start" and "end" position are the same
+/// (so that `&some_url[FooStart..FooEnd]` is the empty string)
+/// and component ordering is preserved
+/// (so that a missing query "is between" a path and a fragment).
+///
+/// The end of a component and the start of the next are either the same or separate
+/// by a delimiter.
+/// (Not that the initial `/` of a path is considered part of the path here, not a delimiter.)
+/// For example, `&url[..FragmentStart]` would include a `#` delimiter (if present in `url`),
+/// so `&url[..QueryEnd]` might be desired instead.
+///
+/// `SchemeStart` and `FragmentEnd` are always the start and end of the entire URL,
+/// so `&url[SchemeStart..X]` is the same as `&url[..X]`
+/// and `&url[X..FragmentEnd]` is the same as `&url[X..]`.
+pub enum Position {
+    SchemeStart,
+    SchemeEnd,
+    UsernameStart,
+    UsernameEnd,
+    PasswordStart,
+    PasswordEnd,
+    HostStart,
+    HostEnd,
+    PortStart,
+    PortEnd,
+    PathStart,
+    PathEnd,
+    QueryStart,
+    QueryEnd,
+    FragmentStart,
+    FragmentEnd
+}
+
 impl Url {
+    #[inline]
+    fn index(&self, position: Position) -> usize {
+        match position {
+            Position::SchemeStart => 0,
+
+            Position::SchemeEnd => self.scheme_end as usize,
+
+            Position::UsernameStart => if self.non_relative {
+                debug_assert!(self.byte_at(self.scheme_end) == b':');
+                debug_assert!(self.scheme_end + ":".len() as u32 == self.username_end);
+                self.scheme_end as usize + ":".len()
+            } else {
+                debug_assert!(self.slice(self.scheme_end..).starts_with("://"));
+                self.scheme_end as usize + "://".len()
+            },
+
+            Position::UsernameEnd => self.username_end as usize,
+
+            Position::PasswordStart => if self.port.is_some() {
+                debug_assert!(self.has_host());
+                debug_assert!(self.byte_at(self.username_end) == b':');
+                self.username_end as usize + ":".len()
+            } else {
+                debug_assert!(self.username_end == self.host_start);
+                self.username_end as usize
+            },
+
+            Position::PasswordEnd => if self.port.is_some() {
+                debug_assert!(self.has_host());
+                debug_assert!(self.byte_at(self.username_end) == b':');
+                debug_assert!(self.byte_at(self.host_start - "@".len() as u32) == b'@');
+                self.host_start as usize - "@".len()
+            } else {
+                debug_assert!(self.username_end == self.host_start);
+                self.host_start as usize
+            },
+
+            Position::HostStart => self.host_start as usize,
+
+            Position::HostEnd => self.host_end as usize,
+
+            Position::PortStart => if self.port.is_some() {
+                debug_assert!(self.byte_at(self.host_end) == b':');
+                self.host_end as usize + ":".len()
+            } else {
+                self.host_end as usize
+            },
+
+            Position::PortEnd => self.path_start as usize,
+
+            Position::PathStart => self.path_start as usize,
+
+            Position::PathEnd => match (self.query_start, self.fragment_start) {
+                (Some(q), _) => q as usize,
+                (None, Some(f)) => f as usize,
+                (None, None) => self.serialization.len(),
+            },
+
+            Position::QueryStart => match (self.query_start, self.fragment_start) {
+                (Some(q), _) => {
+                    debug_assert!(self.byte_at(q) == b'?');
+                    q as usize + "?".len()
+                }
+                (None, Some(f)) => f as usize,
+                (None, None) => self.serialization.len(),
+            },
+
+            Position::QueryEnd => match self.fragment_start {
+                None => self.serialization.len(),
+                Some(f) => f as usize,
+            },
+
+            Position::FragmentStart => match self.fragment_start {
+                Some(f) => {
+                    debug_assert!(self.byte_at(f) == b'#');
+                    f as usize + "#".len()
+                }
+                None => self.serialization.len(),
+            },
+
+            Position::FragmentEnd => self.serialization.len(),
+        }
+    }
+
     #[inline]
     fn slice<R>(&self, range: R) -> &str where R: RangeArg {
         range.slice_of(&self.serialization)

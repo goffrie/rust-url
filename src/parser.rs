@@ -150,7 +150,7 @@ impl<'a> Parser<'a> {
             // No-scheme state
             return if let Some(base_url) = self.base_url {
                 if input.starts_with("#") {
-                    Ok(self.fragment_only(base_url, input))
+                    self.fragment_only(base_url, input)
                 } else if base_url.non_relative {
                     Err(ParseError::RelativeUrlWithNonRelativeBase)
                 } else {
@@ -228,9 +228,9 @@ impl<'a> Parser<'a> {
                         serialization: self.serialization,
                         non_relative: true,
                         scheme_end: scheme_end,
-                        username_end: 0,
-                        host_start: 0,
-                        host_end: 0,
+                        username_end: path_start,
+                        host_start: path_start,
+                        host_end: path_start,
                         host: HostInternal::None,
                         port: None,
                         path_start: path_start,
@@ -239,23 +239,6 @@ impl<'a> Parser<'a> {
                     })
                 }
             }
-        }
-    }
-
-    pub fn fragment_only(mut self, base_url: &Url, input: &str) -> Url {
-        let copied = match base_url.fragment_start {
-            Some(i) => i as usize,
-            None => base_url.serialization.len(),
-        };
-        debug_assert!(self.serialization.is_empty());
-        self.serialization.reserve(copied + input.len());
-        self.serialization.push_str(&base_url.serialization[..copied]);
-        self.serialization.push_str("#");
-        debug_assert!(input.starts_with("."));
-        self.parse_fragment(&input[1..]);
-        Url {
-            serialization: self.serialization,
-            ..*base_url
         }
     }
 
@@ -770,6 +753,24 @@ impl<'a> Parser<'a> {
         let query_bytes = encoding.encode(&query);
         percent_encode_to(&query_bytes, QUERY_ENCODE_SET, &mut self.serialization);
         remaining
+    }
+
+    pub fn fragment_only(mut self, base_url: &Url, input: &str) -> ParseResult<Url> {
+        let fragment_start = match base_url.fragment_start {
+            Some(i) => i as usize,
+            None => base_url.serialization.len(),
+        };
+        debug_assert!(self.serialization.is_empty());
+        self.serialization.reserve(fragment_start + input.len());
+        self.serialization.push_str(&base_url.serialization[..fragment_start]);
+        self.serialization.push('#');
+        debug_assert!(input.starts_with("#"));
+        self.parse_fragment(&input[1..]);
+        Ok(Url {
+            serialization: self.serialization,
+            fragment_start: Some(try!(to_u32(fragment_start))),
+            ..*base_url
+        })
     }
 
     pub fn parse_fragment(&mut self, input: &str) {
