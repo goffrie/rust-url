@@ -101,6 +101,18 @@ impl SchemeType {
     fn is_special(&self) -> bool {
         !matches!(*self, SchemeType::NotSpecial)
     }
+
+    fn is_file(&self) -> bool {
+        matches!(*self, SchemeType::File)
+    }
+
+    fn from(s: &str) -> Self {
+        match s {
+            "http" | "https" | "ws" | "wss" | "ftp" | "gopher" => SchemeType::SpecialNotFile,
+            "file" => SchemeType::File,
+            _ => SchemeType::NotSpecial,
+        }
+    }
 }
 
 pub struct Parser<'a> {
@@ -138,31 +150,12 @@ impl<'a> Parser<'a> {
             // No-scheme state
             return if let Some(base_url) = self.base_url {
                 if input.starts_with("#") {
-                    let copied = match base_url.fragment_start {
-                        Some(i) => i as usize,
-                        None => base_url.serialization.len(),
-                    };
-                    debug_assert!(self.serialization.is_empty());
-                    self.serialization.reserve(copied + input.len());
-                    self.serialization.push_str(&base_url.serialization[..copied]);
-                    self.serialization.push_str("#");
-                    self.parse_fragment(&input[1..]);
-                    Ok(Url {
-                        serialization: self.serialization,
-                        non_relative: base_url.non_relative,
-                        scheme_end: base_url.scheme_end,
-                        username_end: base_url.username_end,
-                        host_range: base_url.host_range.clone(),
-                        host: base_url.host,
-                        port: base_url.port,
-                        path_start: base_url.path_start,
-                        query_start: base_url.query_start,
-                        fragment_start: base_url.fragment_start
-                    })
+                    Ok(self.fragment_only(base_url, input))
                 } else if base_url.non_relative {
                     Err(ParseError::RelativeUrlWithNonRelativeBase)
                 } else {
-                    if base_url.scheme() == "file" {
+                    let base_scheme_type = SchemeType::from(base_url.scheme());
+                    if base_scheme_type.is_file() {
                         // file state
                         unimplemented!()
                     } else {
@@ -177,11 +170,7 @@ impl<'a> Parser<'a> {
                 Err(ParseError::RelativeUrlWithoutBase)
             }
         };
-        let scheme_type = match &*self.serialization {
-            "http" | "https" | "ws" | "wss" | "ftp" | "gopher" => SchemeType::SpecialNotFile,
-            "file" => SchemeType::File,
-            _ => SchemeType::NotSpecial,
-        };
+        let scheme_type = SchemeType::from(&self.serialization);
         self.serialization.push(':');
         match scheme_type {
             SchemeType::File => {
@@ -240,7 +229,8 @@ impl<'a> Parser<'a> {
                         non_relative: true,
                         scheme_end: scheme_end,
                         username_end: 0,
-                        host_range: 0..0,
+                        host_start: 0,
+                        host_end: 0,
                         host: HostInternal::None,
                         port: None,
                         path_start: path_start,
@@ -249,6 +239,23 @@ impl<'a> Parser<'a> {
                     })
                 }
             }
+        }
+    }
+
+    pub fn fragment_only(mut self, base_url: &Url, input: &str) -> Url {
+        let copied = match base_url.fragment_start {
+            Some(i) => i as usize,
+            None => base_url.serialization.len(),
+        };
+        debug_assert!(self.serialization.is_empty());
+        self.serialization.reserve(copied + input.len());
+        self.serialization.push_str(&base_url.serialization[..copied]);
+        self.serialization.push_str("#");
+        debug_assert!(input.starts_with("."));
+        self.parse_fragment(&input[1..]);
+        Url {
+            serialization: self.serialization,
+            ..*base_url
         }
     }
 
@@ -887,7 +894,7 @@ fn to_u32(i: usize) -> ParseResult<u32> {
 /// Wether the scheme is file:, the path has a single component, and that component
 /// is a Windows drive letter
 fn is_windows_drive_letter(scheme_type: SchemeType, component: &str) -> bool {
-    matches!(scheme_type, SchemeType::File)
+    scheme_type.is_file()
     && component.len() == 2
     && ascii_alpha(component.as_bytes()[0] as char)
     && matches!(component.as_bytes()[1], b':' | b'|')

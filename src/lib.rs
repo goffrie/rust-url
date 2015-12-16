@@ -170,7 +170,8 @@ pub struct Url {
     // Components
     scheme_end: u32,  // Before ':'
     username_end: u32,
-    host_range: Range<u32>,
+    host_start: u32,
+    host_end: u32,
     host: HostInternal,
     port: Option<u16>,
     path_start: u32,  // Before initial '/' if !non_relative
@@ -222,18 +223,6 @@ impl Url {
                       encoding_override: EncodingOverride,
                       log_syntax_violation: Option<&Fn(&'static str)>)
                       -> Result<Url, ::ParseError> {
-//        let mut url = Url {
-//            serialization: String::new(),
-//            non_relative: false,
-//            scheme_end: 0,
-//            username_end: 0,
-//            host_range: 0..0,
-//            host: HostInternal::None,
-//            port: None,
-//            path_start: 0,
-//            query_start: None,
-//            fragment_start: None,
-//        };
         parser::Parser {
             serialization: String::with_capacity(input.len()),
             base_url: base_url,
@@ -269,7 +258,7 @@ impl Url {
     pub fn password(&self) -> Option<&str> {
         if self.byte_at(self.username_end) == b':' {
             debug_assert!(self.has_host());
-            let password_end = self.host_range.start - 1;
+            let password_end = self.host_start - 1;
             debug_assert!(self.byte_at(password_end) == b'@');
             Some(self.slice(self.username_end + 1..password_end))
         } else {
@@ -292,7 +281,7 @@ impl Url {
     /// don’t have a host.
     pub fn host_str(&self) -> Option<&str> {
         if self.has_host() {
-            Some(self.slice(self.host_range.clone()))
+            Some(self.slice(self.host_start..self.host_end))
         } else {
             None
         }
@@ -306,7 +295,7 @@ impl Url {
     pub fn host(&self) -> Option<Host> {
         match self.host {
             HostInternal::None => None,
-            HostInternal::Domain => Some(Host::Domain(self.slice(self.host_range.clone()))),
+            HostInternal::Domain => Some(Host::Domain(self.slice(self.host_start..self.host_end))),
             HostInternal::Ipv4(address) => Some(Host::Ipv4(address)),
             HostInternal::Ipv6(address) => Some(Host::Ipv6(address)),
         }
@@ -435,7 +424,7 @@ impl Idl {
     /// Getter for https://url.spec.whatwg.org/#dom-url-host
     #[inline]
     pub fn get_host(url: &Url) -> &str {
-        let host = url.slice(url.host_range.clone());
+        let host = url.slice(url.host_start..url.host_end);
         debug_assert!(!host.is_empty() || url.non_relative);
         host
     }
@@ -460,8 +449,8 @@ impl Idl {
     #[inline]
     pub fn get_port(url: &Url) -> &str {
         if url.port.is_some() {
-            debug_assert!(url.byte_at(url.host_range.end) == b':');
-            url.slice(url.host_range.end + 1..url.path_start)
+            debug_assert!(url.byte_at(url.host_end) == b':');
+            url.slice(url.host_end + 1..url.path_start)
         } else {
             ""
         }
