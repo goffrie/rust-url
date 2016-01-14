@@ -169,7 +169,7 @@ pub struct Url {
 
     // Components
     scheme_end: u32,  // Before ':'
-    username_end: u32,
+    username_end: u32,  // Before ':' (if a password is given) or '@' (if not)
     host_start: u32,
     host_end: u32,
     host: HostInternal,

@@ -15,9 +15,6 @@ use percent_encoding::{from_hex, percent_decode};
 use idna;
 
 
-/// The host name of an URL.
-#[derive(PartialEq, Eq, Clone, Debug, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature="heap_size", derive(HeapSizeOf))]
 pub enum Host {
     /// A (DNS) domain name.
     Domain(String),
@@ -31,7 +28,9 @@ pub enum Host {
 
 
 impl Host {
-    /// Parse a host: either an IPv6 address in [] square brackets, or a domain.
+    /// Parse a host: either an IPv6 address in [] square brackets, an IPv4 address, or a domain.
+    ///
+    /// https://url.spec.whatwg.org/#host-parsing
     ///
     /// Returns `Err` for an empty host, an invalid IPv6 address,
     /// or a or invalid non-ASCII domain.
@@ -64,15 +63,7 @@ impl Host {
             Err(e) => Err(e),
         }
     }
-
-    /// Serialize the host as a string.
-    ///
-    /// A domain a returned as-is, an IPv6 address between [] square brackets.
-    pub fn serialize(&self) -> String {
-        self.to_string()
-    }
 }
-
 
 impl fmt::Display for Host {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {

@@ -11,7 +11,8 @@ use std::cmp::max;
 use std::error::Error;
 use std::fmt::{self, Formatter};
 
-use super::{Url, Host, HostInternal, EncodingOverride};
+use super::{Url, HostInternal, EncodingOverride};
+use host::Host;
 use percent_encoding::{
     utf8_percent_encode_to, percent_encode_to,
     SIMPLE_ENCODE_SET, DEFAULT_ENCODE_SET, USERINFO_ENCODE_SET, QUERY_ENCODE_SET
@@ -115,6 +116,16 @@ impl SchemeType {
     }
 }
 
+fn default_port(scheme: &str) -> Option<u16> {
+    match scheme {
+        "http" | "ws" => Some(80),
+        "https" | "wss" => Some(443),
+        "ftp" => Some(21),
+        "gopher" => Some(70),
+        _ => None,
+    }
+}
+
 pub struct Parser<'a> {
     pub serialization: String,
     pub base_url: Option<&'a Url>,
@@ -211,10 +222,19 @@ impl<'a> Parser<'a> {
             },
             SchemeType::NotSpecial => {
                 if remaining.starts_with("//") {
+                    self.serialization.push('/');
+                    self.serialization.push('/');
+                    let remaining = &remaining[2..];
                     // authority state
-                    &remaining[2..];
-                    unimplemented!()
+                    let (username_end, remaining) =
+                        try!(self.parse_userinfo(remaining, scheme_type));
+                    let host_start = try!(to_u32(self.serialization.len()));
+                    let (host_end, host, port, remaining) =
+                        try!(self.parse_host_and_port(remaining, scheme_end));
+                    let path_start = try!(to_u32(self.serialization.len()));
+                    unimplemented!();
                 } else {
+                    // Anarchist URL (no authority)
                     let path_start = try!(to_u32(self.serialization.len()));
                     let remaining = if remaining.starts_with("/") {
                         self.serialization.push('/');
@@ -274,7 +294,7 @@ impl<'a> Parser<'a> {
     //    // Authority first slash state
     //    let remaining = try!(skip_slashes(input, parser));
     //    // Authority state
-    //    let (username, password, remaining) = try!(parse_userinfo(remaining, parser));
+    //    let (username, password, remaining) = try!(p_arse_userinfo(remaining, parser));
     //    // Host state
     //    let (host, port, default_port, remaining) = try!(parse_host(remaining, scheme_type, parser));
     //    let (path, remaining) = try!(parse_path_start(
@@ -413,107 +433,102 @@ impl<'a> Parser<'a> {
     //    Ok(&input[first_non_slash..])
     //}
 
-    //fn parse_userinfo<'i>(input: &'i str, parser: &mut Parser)
-    //                      -> ParseResult<(String, Option<String>, &'i str)> {
-    //    let mut last_at = None;
-    //    for (i, c) in input.char_indices() {
-    //        match c {
-    //            '@' => {
-    //                if last_at.is_some() {
-    //                    try!(self.syntax_violation(ParseError::InvalidAtSymbolInUser))
-    //                }
-    //                last_at = Some(i)
-    //            },
-    //            '/' | '\\' | '?' | '#' => break,
-    //            _ => (),
-    //        }
-    //    }
-    //    let (input, remaining) = match last_at {
-    //        Some(at) => (&input[..at], &input[at + 1..]),
-    //        None => return Ok((String::new(), None, input)),
-    //    };
+    /// Return (username_end, remaining)
+    fn parse_userinfo<'i>(&mut self, input: &'i str, scheme_type: SchemeType)
+                          -> ParseResult<(u32, &'i str)> {
+        let mut last_at = None;
+        for (i, c) in input.char_indices() {
+            match c {
+                '@' => {
+                    if last_at.is_some() {
+                        self.syntax_violation("unencoded @ sign in username or password")
+                    } else {
+                        self.syntax_violation(
+                            "embedding authentification information (username or password) \
+                            in an URL is not recommended")
+                    }
+                    last_at = Some(i)
+                },
+                '/' | '?' | '#' => break,
+                '\\' if scheme_type.is_special() => break,
+                _ => (),
+            }
+        }
+        let (input, remaining) = match last_at {
+            Some(at) => (&input[..at], &input[at + 1..]),
+            None => return Ok((try!(to_u32(self.serialization.len())), input)),
+        };
 
-    //    let mut username = String::new();
-    //    let mut password = None;
-    //    for (i, c, next_i) in input.char_ranges() {
-    //        match c {
-    //            ':' => {
-    //                password = Some(try!(parse_password(&input[i + 1..], parser)));
-    //                break
-    //            },
-    //            '\t' | '\n' | '\r' => try!(self.syntax_violation(ParseError::InvalidCharacter)),
-    //            _ => {
-    //                try!(check_url_code_point(input, i, c, parser));
-    //                // The spec says to use the default encode set,
-    //                // but also replaces '@' by '%40' in an earlier step.
-    //                utf8_percent_encode_to(&input[i..next_i],
-    //                                    USERINFO_ENCODE_SET, &mut username);
-    //            }
-    //        }
-    //    }
-    //    Ok((username, password, remaining))
-    //}
+        let mut username_end = None;
+        for (i, c, next_i) in input.char_ranges() {
+            match c {
+                ':' if username_end.is_none() => {
+                    // Start parsing password
+                    username_end = Some(try!(to_u32(i)));
+                    self.serialization.push(':');
+                },
+                '\t' | '\n' | '\r' => {},
+                _ => {
+                    self.check_url_code_point(input, i, c);
+                    let utf8_c = &input[i..next_i];
+                    utf8_percent_encode_to(utf8_c, USERINFO_ENCODE_SET, &mut self.serialization);
+                }
+            }
+        }
+        self.serialization.push('@');
+        let username_end = match username_end {
+            Some(i) => i,
+            None => try!(to_u32(self.serialization.len())),
+        };
+        Ok((username_end, remaining))
+    }
 
-    //fn parse_password(input: &str, parser: &mut Parser) -> ParseResult<String> {
-    //    let mut password = String::new();
-    //    for (i, c, next_i) in input.char_ranges() {
-    //        match c {
-    //            '\t' | '\n' | '\r' => try!(self.syntax_violation(ParseError::InvalidCharacter)),
-    //            _ => {
-    //                try!(check_url_code_point(input, i, c, parser));
-    //                // The spec says to use the default encode set,
-    //                // but also replaces '@' by '%40' in an earlier step.
-    //                utf8_percent_encode_to(&input[i..next_i],
-    //                                    USERINFO_ENCODE_SET, &mut password);
-    //            }
-    //        }
-    //    }
-    //    Ok(password)
-    //}
+    pub fn parse_host_and_port<'i>(&mut self, input: &'i str, scheme_end: u32)
+                                   -> ParseResult<(u32, HostInternal, Option<u16>, &'i str)> {
+        let (host, remaining) = try!(self.parse_host(input));
+        let host_end = try!(to_u32(self.serialization.len()));
+        let (port, remaining) = if remaining.starts_with(":") {
+            try!(self.parse_port(&remaining[1..], scheme_end))
+        } else {
+            (None, remaining)
+        };
+        Ok((host_end, host, port, remaining))
+    }
 
-    //pub fn parse_host<'i>(input: &'i str, scheme_type: SchemeType, parser: &mut Parser)
-    //                          -> ParseResult<(Host, Option<u16>, Option<u16>, &'i str)> {
-    //    let (host, remaining) = try!(parse_hostname(input, parser));
-    //    let (port, default_port, remaining) = if remaining.starts_with(":") {
-    //        try!(parse_port(&remaining[1..], scheme_type, parser))
-    //    } else {
-    //        (None, scheme_type.default_port(), remaining)
-    //    };
-    //    Ok((host, port, default_port, remaining))
-    //}
+    pub fn parse_host<'i>(&mut self, input: &'i str) -> ParseResult<(HostInternal, &'i str)> {
+        let mut inside_square_brackets = false;
+        let mut host_input = String::new();
+        let mut end = input.len();
+        for (i, c) in input.char_indices() {
+            match c {
+                ':' if !inside_square_brackets => {
+                    end = i;
+                    break
+                },
+                '/' | '\\' | '?' | '#' => {
+                    end = i;
+                    break
+                },
+                '\t' | '\n' | '\r' => self.syntax_violation("invalid character"),
+                c => {
+                    match c {
+                        '[' => inside_square_brackets = true,
+                        ']' => inside_square_brackets = false,
+                        _ => (),
+                    }
+                    host_input.push(c)
+                }
+            }
+        }
+        unimplemented!();
+        let host = try!(Host::parse(&host_input));
+        Ok((host, &input[end..]))
+    }
 
-    //pub fn parse_hostname<'i>(input: &'i str, parser: &mut Parser)
-    //                      -> ParseResult<(Host, &'i str)> {
-    //    let mut inside_square_brackets = false;
-    //    let mut host_input = String::new();
-    //    let mut end = input.len();
-    //    for (i, c) in input.char_indices() {
-    //        match c {
-    //            ':' if !inside_square_brackets => {
-    //                end = i;
-    //                break
-    //            },
-    //            '/' | '\\' | '?' | '#' => {
-    //                end = i;
-    //                break
-    //            },
-    //            '\t' | '\n' | '\r' => try!(self.syntax_violation(ParseError::InvalidCharacter)),
-    //            c => {
-    //                match c {
-    //                    '[' => inside_square_brackets = true,
-    //                    ']' => inside_square_brackets = false,
-    //                    _ => (),
-    //                }
-    //                host_input.push(c)
-    //            }
-    //        }
-    //    }
-    //    let host = try!(Host::parse(&host_input));
-    //    Ok((host, &input[end..]))
-    //}
-
-    //pub fn parse_port<'i>(input: &'i str, scheme_type: SchemeType, parser: &mut Parser)
-    //                      -> ParseResult<(Option<u16>, Option<u16>, &'i str)> {
+    pub fn parse_port<'i>(&mut self, input: &'i str, scheme_end: u32)
+                          -> ParseResult<(Option<u16>, &'i str)> {
+        let default_port = default_port(&self.serialization[..scheme_end as usize]);
+        unimplemented!();
     //    let mut port = 0;
     //    let mut has_any_digit = false;
     //    let mut end = input.len();
@@ -540,7 +555,7 @@ impl<'a> Parser<'a> {
     //        port = None;
     //    }
     //    return Ok((port, default_port, &input[end..]))
-    //}
+    }
 
     //fn parse_file_host<'i>(input: &'i str, parser: &mut Parser) -> ParseResult<(Host, &'i str)> {
     //    let mut host_input = String::new();
@@ -786,7 +801,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    #[inline]
     fn check_url_code_point(&self, input: &str, i: usize, c: char) {
         if let Some(log) = self.log_syntax_violation {
             if c == '%' {
