@@ -130,7 +130,7 @@ assert!(&*css_url.serialize() == "http://servo.github.io/rust-url/main.css")
 #![cfg_attr(feature="heap_size", plugin(heapsize_plugin))]
 
 extern crate rustc_serialize;
-extern crate uuid;
+extern crate rand;
 #[macro_use] extern crate matches;
 #[cfg(feature="serde_serialization")] extern crate serde;
 #[cfg(feature="heap_size")] #[macro_use] extern crate heapsize;
@@ -138,18 +138,13 @@ extern crate uuid;
 extern crate unicode_normalization;
 extern crate unicode_bidi;
 
-use std::path::{Path, PathBuf};
-use std::borrow::Borrow;
-
 use std::cmp;
 use std::fmt;
 use std::hash;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::ops::{Range, RangeFrom, RangeTo, RangeFull, Index};
 
-use percent_encoding::{percent_encode, lossy_utf8_percent_decode, DEFAULT_ENCODE_SET};
 pub use encoding::EncodingOverride;
-use uuid::Uuid;
 pub use parser::ParseError;
 
 mod encoding;
@@ -185,6 +180,18 @@ enum HostInternal {
     Domain,
     Ipv4(Ipv4Addr),
     Ipv6(Ipv6Addr),
+}
+
+impl HostInternal {
+    // FIXME: This should be in Parser::parse_host which should return HostInternal
+    // but currently doesn’t because of https://github.com/rust-lang/rust/issues/30905
+    fn from_parsed(host: host::Host) -> HostInternal {
+        match host {
+            host::Host::Domain(_) => HostInternal::Domain,
+            host::Host::Ipv4(address) => HostInternal::Ipv4(address),
+            host::Host::Ipv6(address) => HostInternal::Ipv6(address),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -226,7 +233,7 @@ impl Url {
         parser::Parser {
             serialization: String::with_capacity(input.len()),
             base_url: base_url,
-            query_encoding_override: EncodingOverride,
+            query_encoding_override: encoding_override,
             log_syntax_violation: log_syntax_violation,
         }.parse_url(input)
     }
@@ -363,18 +370,18 @@ impl Url {
 pub struct Idl;
 
 impl Idl {
-    /// https://url.spec.whatwg.org/#dom-url-domaintoascii
-    pub fn domain_to_ascii(domain: &str) -> String {
+    /// **Not implemented yet** https://url.spec.whatwg.org/#dom-url-domaintoascii
+    pub fn domain_to_ascii(_domain: &str) -> String {
         unimplemented!()  // FIXME
     }
 
-    /// https://url.spec.whatwg.org/#dom-url-domaintounicode
-    pub fn domain_to_unicode(domain: &str) -> String {
+    /// **Not implemented yet**https://url.spec.whatwg.org/#dom-url-domaintounicode
+    pub fn domain_to_unicode(_domain: &str) -> String {
         unimplemented!()  // FIXME
     }
 
-    /// Getter for https://url.spec.whatwg.org/#dom-url-origin
-    pub fn get_origin(url: &Url) -> String {
+    /// **Not implemented yet** Getter for https://url.spec.whatwg.org/#dom-url-origin
+    pub fn get_origin(_url: &Url) -> String {
         unimplemented!()  // FIXME
     }
 
@@ -385,8 +392,8 @@ impl Idl {
         url.slice(..url.scheme_end + 1)
     }
 
-    /// Setter for https://url.spec.whatwg.org/#dom-url-protocol
-    pub fn set_protocol(url: &mut Url, new_protocol: &str) {
+    /// **Not implemented yet** Setter for https://url.spec.whatwg.org/#dom-url-protocol
+    pub fn set_protocol(_url: &mut Url, _new_protocol: &str) {
         unimplemented!()  // FIXME
     }
 
@@ -396,8 +403,8 @@ impl Idl {
         url.username()
     }
 
-    /// Setter for https://url.spec.whatwg.org/#dom-url-username
-    pub fn set_username(url: &mut Url, new_username: &str) {
+    /// **Not implemented yet** Setter for https://url.spec.whatwg.org/#dom-url-username
+    pub fn set_username(_url: &mut Url, _new_username: &str) {
         unimplemented!()  // FIXME
     }
 
@@ -407,8 +414,8 @@ impl Idl {
         url.password().unwrap_or("")
     }
 
-    /// Setter for https://url.spec.whatwg.org/#dom-url-password
-    pub fn set_password(url: &mut Url, new_password: &str) {
+    /// **Not implemented yet** Setter for https://url.spec.whatwg.org/#dom-url-password
+    pub fn set_password(_url: &mut Url, _new_password: &str) {
         unimplemented!()  // FIXME
     }
 
@@ -420,8 +427,8 @@ impl Idl {
         host
     }
 
-    /// Setter for https://url.spec.whatwg.org/#dom-url-host
-    pub fn set_host(url: &mut Url, new_host: &str) {
+    /// **Not implemented yet** Setter for https://url.spec.whatwg.org/#dom-url-host
+    pub fn set_host(_url: &mut Url, _new_host: &str) {
         unimplemented!()  // FIXME
     }
 
@@ -431,8 +438,8 @@ impl Idl {
         url.host_str().unwrap_or("")
     }
 
-    /// Setter for https://url.spec.whatwg.org/#dom-url-hostname
-    pub fn set_hostname(url: &mut Url, new_hostname: &str) {
+    /// **Not implemented yet** Setter for https://url.spec.whatwg.org/#dom-url-hostname
+    pub fn set_hostname(_url: &mut Url, _new_hostname: &str) {
         unimplemented!()  // FIXME
     }
 
@@ -447,8 +454,8 @@ impl Idl {
         }
     }
 
-    /// Setter for https://url.spec.whatwg.org/#dom-url-port
-    pub fn set_port(url: &mut Url, new_port: &str) {
+    /// **Not implemented yet** Setter for https://url.spec.whatwg.org/#dom-url-port
+    pub fn set_port(_url: &mut Url, _new_port: &str) {
         unimplemented!()  // FIXME
     }
 
@@ -458,8 +465,8 @@ impl Idl {
          url.path()
     }
 
-    /// Setter for https://url.spec.whatwg.org/#dom-url-pathname
-    pub fn set_pathname(url: &mut Url, new_pathname: &str) {
+    /// **Not implemented yet** Setter for https://url.spec.whatwg.org/#dom-url-pathname
+    pub fn set_pathname(_url: &mut Url, _new_pathname: &str) {
         unimplemented!()  // FIXME
     }
 
@@ -474,13 +481,13 @@ impl Idl {
         }
     }
 
-    /// Setter for https://url.spec.whatwg.org/#dom-url-search
-    pub fn set_search(url: &mut Url, new_search: &str) {
+    /// **Not implemented yet** Setter for https://url.spec.whatwg.org/#dom-url-search
+    pub fn set_search(_url: &mut Url, _new_search: &str) {
         unimplemented!()  // FIXME
     }
 
-    /// Getter for https://url.spec.whatwg.org/#dom-url-searchparams
-    pub fn get_search_params(url: &Url) -> Vec<(String, String)> {
+    /// **Not implemented yet** Getter for https://url.spec.whatwg.org/#dom-url-searchparams
+    pub fn get_search_params(_url: &Url) -> Vec<(String, String)> {
         unimplemented!();  // FIXME
     }
 
@@ -492,8 +499,8 @@ impl Idl {
         }
     }
 
-    /// Setter for https://url.spec.whatwg.org/#dom-url-hash
-    pub fn set_hash(url: &mut Url, new_hash: &str) {
+    /// **Not implemented yet** Setter for https://url.spec.whatwg.org/#dom-url-hash
+    pub fn set_hash(_url: &mut Url, _new_hash: &str) {
         unimplemented!()  // FIXME
     }
 }

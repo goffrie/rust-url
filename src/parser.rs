@@ -7,9 +7,8 @@
 // except according to those terms.
 
 use std::ascii::AsciiExt;
-use std::cmp::max;
 use std::error::Error;
-use std::fmt::{self, Formatter};
+use std::fmt::{self, Write, Formatter};
 
 use super::{Url, HostInternal, EncodingOverride};
 use host::Host;
@@ -92,7 +91,7 @@ pub enum Context {
 }
 
 #[derive(Copy, Clone)]
-enum SchemeType {
+pub enum SchemeType {
     File,
     SpecialNotFile,
     NotSpecial,
@@ -228,17 +227,37 @@ impl<'a> Parser<'a> {
                     // authority state
                     let (username_end, remaining) =
                         try!(self.parse_userinfo(remaining, scheme_type));
+                    // host state
                     let host_start = try!(to_u32(self.serialization.len()));
                     let (host_end, host, port, remaining) =
-                        try!(self.parse_host_and_port(remaining, scheme_end));
+                        try!(self.parse_host_and_port(remaining, scheme_end, scheme_type));
+                    // path state
                     let path_start = try!(to_u32(self.serialization.len()));
-                    unimplemented!();
+                    let remaining = self.parse_path_start(
+                        scheme_type, &mut true, remaining, Context::UrlParser);
+                    let (query_start, fragment_start) =
+                        try!(self.parse_query_and_fragment(scheme_end, remaining));
+                    Ok(Url {
+                        serialization: self.serialization,
+                        non_relative: false,
+                        scheme_end: scheme_end,
+                        username_end: username_end,
+                        host_start: host_start,
+                        host_end: host_end,
+                        host: HostInternal::from_parsed(host),
+                        port: port,
+                        path_start: path_start,
+                        query_start: query_start,
+                        fragment_start: fragment_start
+                    })
                 } else {
                     // Anarchist URL (no authority)
                     let path_start = try!(to_u32(self.serialization.len()));
-                    let remaining = if remaining.starts_with("/") {
+                    let relative = remaining.starts_with("/");
+                    let remaining = if relative {
                         self.serialization.push('/');
-                        self.parse_path(scheme_type, &mut false, &remaining[1..], Context::UrlParser)
+                        self.parse_path(
+                            scheme_type, &mut false, &remaining[1..], Context::UrlParser)
                     } else {
                         self.parse_non_relative_path(remaining)
                     };
@@ -246,7 +265,7 @@ impl<'a> Parser<'a> {
                         try!(self.parse_query_and_fragment(scheme_end, remaining));
                     Ok(Url {
                         serialization: self.serialization,
-                        non_relative: true,
+                        non_relative: !relative,
                         scheme_end: scheme_end,
                         username_end: path_start,
                         host_start: path_start,
@@ -483,9 +502,10 @@ impl<'a> Parser<'a> {
         Ok((username_end, remaining))
     }
 
-    pub fn parse_host_and_port<'i>(&mut self, input: &'i str, scheme_end: u32)
-                                   -> ParseResult<(u32, HostInternal, Option<u16>, &'i str)> {
-        let (host, remaining) = try!(self.parse_host(input));
+    pub fn parse_host_and_port<'i>(&mut self, input: &'i str,
+                                   scheme_end: u32, scheme_type: SchemeType)
+                                   -> ParseResult<(u32, Host, Option<u16>, &'i str)> {
+        let (host, remaining) = try!(self.parse_host(input, scheme_type));
         let host_end = try!(to_u32(self.serialization.len()));
         let (port, remaining) = if remaining.starts_with(":") {
             try!(self.parse_port(&remaining[1..], scheme_end))
@@ -495,66 +515,82 @@ impl<'a> Parser<'a> {
         Ok((host_end, host, port, remaining))
     }
 
-    pub fn parse_host<'i>(&mut self, input: &'i str) -> ParseResult<(HostInternal, &'i str)> {
+    pub fn parse_host<'i>(&mut self, input: &'i str, scheme_type: SchemeType)
+                          -> ParseResult<(Host, &'i str)> {
         let mut inside_square_brackets = false;
-        let mut host_input = String::new();
+        let mut has_ignored_chars = false;
         let mut end = input.len();
-        for (i, c) in input.char_indices() {
-            match c {
-                ':' if !inside_square_brackets => {
+        for (i, b) in input.bytes().enumerate() {
+            match b {
+                b':' if !inside_square_brackets => {
                     end = i;
                     break
                 },
-                '/' | '\\' | '?' | '#' => {
+                b'/' | b'?' | b'#' => {
                     end = i;
                     break
-                },
-                '\t' | '\n' | '\r' => self.syntax_violation("invalid character"),
-                c => {
-                    match c {
-                        '[' => inside_square_brackets = true,
-                        ']' => inside_square_brackets = false,
-                        _ => (),
-                    }
-                    host_input.push(c)
                 }
+                b'\\' if scheme_type.is_special() => {
+                    end = i;
+                    break
+                }
+                b'\t' | b'\n' | b'\r' => {
+                    self.syntax_violation("invalid character");
+                    has_ignored_chars = true;
+                }
+                b'[' => inside_square_brackets = true,
+                b']' => inside_square_brackets = false,
+                _ => {}
             }
         }
-        unimplemented!();
+        let mut replaced;
+        let host_input = if has_ignored_chars {
+            replaced = input.to_owned();
+            // removing ASCII bytes preserves the UTF-8 invariant
+            unsafe {
+                replaced.as_mut_vec()
+            }.retain(|&b| !matches!(b, b'\t' | b'\n' | b'\r'));
+            &*replaced
+        } else {
+            input
+        };
+        if scheme_type.is_special() && host_input.is_empty() {
+            return Err(ParseError::EmptyHost)
+        }
         let host = try!(Host::parse(&host_input));
+        write!(&mut self.serialization, "{}", host).unwrap();
         Ok((host, &input[end..]))
     }
 
     pub fn parse_port<'i>(&mut self, input: &'i str, scheme_end: u32)
                           -> ParseResult<(Option<u16>, &'i str)> {
-        let default_port = default_port(&self.serialization[..scheme_end as usize]);
-        unimplemented!();
-    //    let mut port = 0;
-    //    let mut has_any_digit = false;
-    //    let mut end = input.len();
-    //    for (i, c) in input.char_indices() {
-    //        match c {
-    //            '0'...'9' => {
-    //                port = port * 10 + (c as u32 - '0' as u32);
-    //                if port > ::std::u16::MAX as u32 {
-    //                    return Err(ParseError::InvalidPort)
-    //                }
-    //                has_any_digit = true;
-    //            },
-    //            '/' | '\\' | '?' | '#' => {
-    //                end = i;
-    //                break
-    //            },
-    //            '\t' | '\n' | '\r' => try!(self.syntax_violation(ParseError::InvalidCharacter)),
-    //            _ => return Err(ParseError::InvalidPort)
-    //        }
-    //    }
-    //    let default_port = scheme_type.default_port();
-    //    let mut port = Some(port as u16);
-    //    if !has_any_digit || port == default_port {
-    //        port = None;
-    //    }
-    //    return Ok((port, default_port, &input[end..]))
+        let mut port = 0;
+        let mut has_any_digit = false;
+        let mut end = input.len();
+        for (i, c) in input.char_indices() {
+            if let Some(digit) = c.to_digit(10) {
+                port = port * 10 + digit;
+                if port > ::std::u16::MAX as u32 {
+                    return Err(ParseError::InvalidPort)
+                }
+                has_any_digit = true;
+            } else {
+                match c {
+                    '/' | '\\' | '?' | '#' => {
+                        end = i;
+                        break
+                    },
+                    '\t' | '\n' | '\r' => self.syntax_violation("invalid character"),
+                    _ => return Err(ParseError::InvalidPort)
+                }
+            }
+        }
+        let scheme = &self.serialization[..scheme_end as usize];
+        let mut port = Some(port as u16);
+        if !has_any_digit || port == default_port(scheme) {
+            port = None;
+        }
+        return Ok((port, &input[end..]))
     }
 
     //fn parse_file_host<'i>(input: &'i str, parser: &mut Parser) -> ParseResult<(Host, &'i str)> {
@@ -593,21 +629,21 @@ impl<'a> Parser<'a> {
     //    Ok((path, query, fragment))
     //}
 
-    //pub fn parse_path_start<'i>(input: &'i str, context: Context, scheme_type: SchemeType,
-    //                            parser: &mut Parser)
-    //                            -> ParseResult<(Vec<String>, &'i str)> {
-    //    let mut i = 0;
-    //    // Relative path start state
-    //    match input.chars().next() {
-    //        Some('/') => i = 1,
-    //        Some('\\') => {
-    //            try!(self.syntax_violation(ParseError::InvalidBackslash));
-    //            i = 1;
-    //        },
-    //        _ => ()
-    //    }
-    //    parse_path(&[], &input[i..], context, scheme_type, parser)
-    //}
+    fn parse_path_start<'i>(&mut self, scheme_type: SchemeType, has_host: &mut bool,
+                            mut input: &'i str, context: Context)
+                            -> &'i str {
+        // Path start state
+        let mut iter = input.chars();
+        match iter.next() {
+            Some('/') => input = iter.as_str(),
+            Some('\\') => {
+                self.syntax_violation("backslash");
+                input = iter.as_str()
+            }
+            _ => {}
+        }
+        self.parse_path(scheme_type, has_host, input, context)
+    }
 
     fn parse_path<'i>(&mut self, scheme_type: SchemeType, has_host: &mut bool,
                       input: &'i str, context: Context)
@@ -701,7 +737,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_non_relative_path<'i>(&mut self, input: &'i str) -> &'i str {
-        let mut end = input.len();
         for (i, c, next_i) in input.char_ranges() {
             match c {
                 '?' | '#' => return &input[i..],

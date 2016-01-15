@@ -35,6 +35,8 @@ impl Host {
     /// Returns `Err` for an empty host, an invalid IPv6 address,
     /// or a or invalid non-ASCII domain.
     pub fn parse(input: &str) -> ParseResult<Host> {
+        // FIXME: remove this, it’s already done in the URL parser.
+        // but check IP address parsing with empty input.
         if input.len() == 0 {
             return Err(ParseError::EmptyHost)
         }
